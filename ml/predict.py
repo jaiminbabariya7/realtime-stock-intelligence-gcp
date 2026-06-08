@@ -1,106 +1,178 @@
-from datetime import datetime, UTC
-import time
+"""
+Batch prediction runner — Stock Intelligence Platform.
+
+Loads trained ARIMA + LSTM models from GCS, generates next-tick
+price forecasts for each configured symbol, and writes predictions
+to BigQuery for the Flask dashboard to query.
+
+Usage:
+    python predict.py                    # all symbols
+    python predict.py --symbol AAPL      # single symbol
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import tempfile
+from datetime import datetime, timezone
+
 import joblib
 import numpy as np
 import pandas as pd
-from google.cloud import bigquery
+from google.cloud import bigquery, storage
+from statsmodels.tsa.arima.model import ARIMAResultsWrapper
 from tensorflow.keras.models import load_model
 
-PROJECT_ID = "stock-intelligence-493706"
-TABLE_ID = "stock-intelligence-493706.stock_data.stock_predictions"
+from symbol_config import PROJECT_ID, BQ_FEAT_TABLE, BQ_PRED_TABLE, SYMBOLS
 
-client = bigquery.Client(project=PROJECT_ID)
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger("predict")
 
-# Load models
-arima_model = joblib.load("ml/model/arima.pkl")
-lstm_model = load_model("ml/model/lstm_model.keras", compile=False)
-scaler = joblib.load("ml/model/scaler.pkl")
+GCS_BUCKET = os.getenv("MODEL_BUCKET", f"{PROJECT_ID}-models")
+SEQ_LEN    = int(os.getenv("SEQ_LEN", "20"))
 
-# ---------------- STATE TRACKING ----------------
-last_written = {}  # symbol -> last price/prediction
-
-
-def fetch_latest_prices(limit: int = 50) -> pd.DataFrame:
-    query = """
-        SELECT symbol, price, timestamp
-        FROM stock_data.raw_stock_data
-        ORDER BY symbol, timestamp DESC
-    """
-    df = client.query(query).to_dataframe()
-    return df.iloc[::-1].reset_index(drop=True)
+bq_client  = bigquery.Client(project=PROJECT_ID)
+gcs_client = storage.Client()
 
 
-def forecast_next_price(prices: np.ndarray) -> float:
-    prices_scaled = scaler.transform(prices.reshape(-1, 1)).flatten()
+# ── Model loader ───────────────────────────────────────────────────────────────
 
-    arima_forecast = arima_model.forecast(steps=1)[0]
-
-    seq_len = 20
-    sequence = prices_scaled[-seq_len:].reshape((1, seq_len, 1))
-
-    lstm_correction = lstm_model.predict(sequence, verbose=0)[0][0]
-
-    final_scaled = arima_forecast + lstm_correction
-    final_price = scaler.inverse_transform([[final_scaled]])[0][0]
-
-    return float(final_price)
+def _download(gcs_path: str, suffix: str) -> str:
+    """Download a GCS object to a temp file and return local path."""
+    tmp  = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    blob = gcs_client.bucket(GCS_BUCKET).blob(gcs_path)
+    blob.download_to_filename(tmp.name)
+    return tmp.name
 
 
-def should_write(symbol, price, predicted_price):
-    last = last_written.get(symbol)
+def load_artefacts(symbol: str) -> dict:
+    """Download and load all model artefacts for a symbol."""
+    logger.info("Loading models for %s from GCS...", symbol)
+    arima_path  = _download(f"stock/{symbol}/arima.pkl",        ".pkl")
+    scaler_path = _download(f"stock/{symbol}/price_scaler.pkl", ".pkl")
+    res_sc_path = _download(f"stock/{symbol}/res_scaler.pkl",   ".pkl")
+    lstm_path   = _download(f"stock/{symbol}/lstm.keras",       ".keras")
+    meta_path   = _download(f"stock/{symbol}/meta.json",        ".json")
 
-    if last is None:
-        return True
+    with open(meta_path) as f:
+        meta = json.load(f)
 
-    price_changed = abs(last["price"] - price) > 1e-6
-    prediction_changed = abs(last["predicted_price"] - predicted_price) > 1e-3
-
-    return price_changed or prediction_changed
-
-
-def write_prediction(symbol: str, price: float, predicted_price: float) -> None:
-    prediction_time = datetime.now(UTC).isoformat()
-
-    row = {
-        "symbol": symbol,
-        "predicted_price": predicted_price,
-        "prediction_time": prediction_time,
+    return {
+        "arima":         joblib.load(arima_path),
+        "price_scaler":  joblib.load(scaler_path),
+        "res_scaler":    joblib.load(res_sc_path),
+        "lstm":          load_model(lstm_path),
+        "seq_len":       meta.get("seq_len", SEQ_LEN),
     }
 
-    errors = client.insert_rows_json(TABLE_ID, [row])
 
-    if not errors:
-        last_written[symbol] = {
-            "price": price,
-            "predicted_price": predicted_price
-        }
-        print(f"Inserted {symbol} at {prediction_time}")
+# ── Prediction logic ───────────────────────────────────────────────────────────
+
+def fetch_recent_prices(symbol: str, n: int = 200) -> np.ndarray:
+    """Fetch last N prices from BigQuery feature table."""
+    sql = f"""
+        SELECT price FROM `{BQ_FEAT_TABLE}`
+        WHERE symbol = @symbol
+        ORDER BY tick_ts DESC LIMIT {n}
+    """
+    cfg = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("symbol", "STRING", symbol)
+        ]
+    )
+    rows = list(bq_client.query(sql, job_config=cfg).result())
+    if not rows:
+        raise ValueError(f"No data found for symbol {symbol}")
+    prices = np.array([r.price for r in reversed(rows)], dtype=float)
+    return prices
+
+
+def predict_next_price(symbol: str, arts: dict) -> dict:
+    """Generate the next-tick hybrid ARIMA+LSTM price forecast.
+
+    Returns a dict suitable for BigQuery insertion.
+    """
+    seq_len = arts["seq_len"]
+    prices  = fetch_recent_prices(symbol, n=max(200, seq_len + 50))
+
+    # 1. Scale prices
+    p_scaled = arts["price_scaler"].transform(
+        prices.reshape(-1, 1)
+    ).flatten()
+
+    # 2. ARIMA one-step forecast
+    arima_fc    = arts["arima"].forecast(steps=1)[0]
+    arima_resid = p_scaled[-1] - arima_fc     # residual at last known tick
+
+    # 3. LSTM predicts next residual from recent residual history
+    arima_resids = arts["arima"].resid.values[-seq_len:]
+    res_scaled   = arts["res_scaler"].transform(
+        arima_resids.reshape(-1, 1)
+    ).flatten()
+    X = res_scaled[-seq_len:].reshape(1, seq_len, 1)
+    lstm_fc_scaled = arts["lstm"].predict(X, verbose=0)[0][0]
+    lstm_fc_resid  = arts["res_scaler"].inverse_transform(
+        [[lstm_fc_scaled]]
+    )[0][0]
+
+    # 4. Combine: hybrid forecast = ARIMA + LSTM residual correction
+    hybrid_scaled = arima_fc + lstm_fc_resid
+    predicted_price = float(
+        arts["price_scaler"].inverse_transform([[hybrid_scaled]])[0][0]
+    )
+    current_price = float(prices[-1])
+    change_pct    = round((predicted_price - current_price) / current_price * 100, 4)
+    direction     = "UP" if predicted_price > current_price else "DOWN"
+
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "symbol":          symbol,
+        "current_price":   round(current_price, 4),
+        "predicted_price": round(predicted_price, 4),
+        "change_pct":      change_pct,
+        "direction":       direction,
+        "model_version":   "arima_lstm_v1",
+        "prediction_time": now,
+        "created_at":      now,
+    }
+
+
+# ── Writer ─────────────────────────────────────────────────────────────────────
+
+def write_predictions(rows: list[dict]) -> None:
+    errors = bq_client.insert_rows_json(BQ_PRED_TABLE, rows)
+    if errors:
+        logger.error("BigQuery write errors: %s", errors)
     else:
-        print("Insert error:", errors)
+        logger.info("Wrote %d predictions to %s", len(rows), BQ_PRED_TABLE)
 
 
-def main_loop():
-    while True:
+# ── Entry point ────────────────────────────────────────────────────────────────
+
+def run(symbols: list[str]) -> None:
+    predictions = []
+    for sym in symbols:
         try:
-            df = fetch_latest_prices()
+            arts = load_artefacts(sym)
+            pred = predict_next_price(sym, arts)
+            predictions.append(pred)
+            logger.info("[%s] current=$%.2f  predicted=$%.2f  (%s %.2f%%)",
+                        sym, pred["current_price"], pred["predicted_price"],
+                        pred["direction"], pred["change_pct"])
+        except Exception as exc:
+            logger.error("Prediction failed for %s: %s", sym, exc)
 
-            for symbol, group in df.groupby("symbol"):
-                prices = group["price"].values
-
-                if len(prices) < 20:
-                    continue
-
-                current_price = prices[-1]
-                predicted_price = forecast_next_price(prices)
-
-                if should_write(symbol, current_price, predicted_price):
-                    write_prediction(symbol, current_price, predicted_price)
-
-        except Exception as e:
-            print("Error:", str(e))
-
-        time.sleep(1)
+    if predictions:
+        write_predictions(predictions)
 
 
 if __name__ == "__main__":
-    main_loop()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--symbol", default=None,
+                        help="Single symbol to predict (default: all)")
+    args   = parser.parse_args()
+    target = [args.symbol.upper()] if args.symbol else SYMBOLS
+    run(target)
