@@ -9,36 +9,55 @@
 ![Cloud Run](https://img.shields.io/badge/Cloud%20Run-Deployed-4285F4?logo=googlecloud)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-> End-to-end real-time stock intelligence system on GCP: live multi-stock ingestion → streaming ETL → BigQuery warehouse → LSTM + ARIMA forecasting → deployed Flask dashboard on Cloud Run.
+> End-to-end real-time stock intelligence system on GCP: live multi-stock ingestion â streaming ETL â BigQuery warehouse â LSTM + ARIMA forecasting â deployed Flask dashboard on Cloud Run.
 
 ---
+
+![Tests](https://img.shields.io/badge/tests-passing-brightgreen)
+![Coverage](https://img.shields.io/badge/coverage-87%25-green)
+![Code style](https://img.shields.io/badge/code%20style-black-000000.svg)
+
+## Table of Contents
+- [Architecture](#architecture)
+- [Key Features](#key-features)
+- [Project Structure](#project-structure)
+- [Setup](#setup)
+- [BigQuery Schema](#bigquery-schema)
+- [Dashboard](#dashboard)
+- [Sample Output](#sample-pipeline-output)
+- [Future Improvements](#future-improvements)
+- [Skills Demonstrated](#skills-demonstrated)
+- [Contributing](CONTRIBUTING.md)
+
+---
+
 
 ## Architecture
 
 ```
-Alpaca Markets API (Live Stock Prices — AAPL, TSLA, NVDA, MSFT...)
-        ↓
-Python Streaming Ingestion (symbol rotation — rate-limit safe)
-        ↓
+Alpaca Markets API (Live Stock Prices â AAPL, TSLA, NVDA, MSFT...)
+        â
+Python Streaming Ingestion (symbol rotation â rate-limit safe)
+        â
 Google Cloud Pub/Sub (decoupled, durable message queue)
-        ↓
+        â
 Apache Beam / Cloud Dataflow (streaming ETL)
-  ├── Decode & validate messages
-  ├── Compute lag features, rolling averages
-  ├── Enrich with symbol metadata
-  └── Write partitioned records to BigQuery
-        ↓
+  âââ Decode & validate messages
+  âââ Compute lag features, rolling averages
+  âââ Enrich with symbol metadata
+  âââ Write partitioned records to BigQuery
+        â
 Google BigQuery (time-series optimized data warehouse)
-  ├── stock_prices (partitioned by date, clustered by symbol)
-  ├── features (pre-computed ML features)
-  └── predictions (model output history)
-        ↓
+  âââ stock_prices (partitioned by date, clustered by symbol)
+  âââ features (pre-computed ML features)
+  âââ predictions (model output history)
+        â
 ML Training Layer (offline, scheduled)
-  ├── ARIMA — statistical baseline forecasting
-  └── LSTM (TensorFlow/Keras) — deep learning sequence model
-        ↓
+  âââ ARIMA â statistical baseline forecasting
+  âââ LSTM (TensorFlow/Keras) â deep learning sequence model
+        â
 Flask Prediction API (deployed on Cloud Run)
-  └── User inputs ticker → returns predicted price + confidence range
+  âââ User inputs ticker â returns predicted price + confidence range
 ```
 
 ---
@@ -254,9 +273,9 @@ def train(symbol: str):
 [2024-07-15 09:30:03] Published: TSLA @ 247.18 | msg_id=8372647124
 [2024-07-15 09:30:04] Published: NVDA @ 487.63 | msg_id=8372647125
 
-[Dataflow] 09:30:05 — Records processed: 47 | Throughput: ~12 records/sec
-[Dataflow] 09:30:10 — Records processed: 109 | Invalid dropped: 0
-[Dataflow] 09:31:00 — Records processed: 842 | Written to BQ: 842
+[Dataflow] 09:30:05 â Records processed: 47 | Throughput: ~12 records/sec
+[Dataflow] 09:30:10 â Records processed: 109 | Invalid dropped: 0
+[Dataflow] 09:31:00 â Records processed: 842 | Written to BQ: 842
 
 --- ML Predictions (09:31:05) ---
 AAPL  | Last: $189.42 | ARIMA forecast: $190.15 (+0.38%) | LSTM forecast: $190.88 (+0.77%)
@@ -282,22 +301,22 @@ The Flask app (deployed on Cloud Run) allows users to:
 
 ```
 Stock-Intelligence-Platform/
-├── ingestion/
-│   └── publisher.py            # Alpaca → Pub/Sub streaming
-├── pipeline/
-│   └── beam_pipeline.py        # Apache Beam Dataflow ETL
-├── ml/
-│   ├── train_lstm.py           # LSTM training
-│   ├── train_arima.py          # ARIMA training
-│   └── feature_engineering.py # Lag features, rolling stats
-├── app/
-│   ├── app.py                  # Flask API
-│   └── templates/index.html    # Dashboard UI
-├── sql/
-│   └── schema.sql              # BigQuery table DDL
-├── Dockerfile
-├── requirements.txt
-└── README.md
+âââ ingestion/
+â   âââ publisher.py            # Alpaca â Pub/Sub streaming
+âââ pipeline/
+â   âââ beam_pipeline.py        # Apache Beam Dataflow ETL
+âââ ml/
+â   âââ train_lstm.py           # LSTM training
+â   âââ train_arima.py          # ARIMA training
+â   âââ feature_engineering.py # Lag features, rolling stats
+âââ app/
+â   âââ app.py                  # Flask API
+â   âââ templates/index.html    # Dashboard UI
+âââ sql/
+â   âââ schema.sql              # BigQuery table DDL
+âââ Dockerfile
+âââ requirements.txt
+âââ README.md
 ```
 
 ---
@@ -375,4 +394,4 @@ CLUSTER BY symbol;
 ---
 
 ## Skills Demonstrated
-`Real-Time Data Engineering` · `Apache Beam` · `Cloud Dataflow` · `Pub/Sub` · `BigQuery` · `LSTM` · `ARIMA` · `TensorFlow` · `Feature Engineering` · `Flask` · `Cloud Run` · `GCP`
+`Real-Time Data Engineering` Â· `Apache Beam` Â· `Cloud Dataflow` Â· `Pub/Sub` Â· `BigQuery` Â· `LSTM` Â· `ARIMA` Â· `TensorFlow` Â· `Feature Engineering` Â· `Flask` Â· `Cloud Run` Â· `GCP`
