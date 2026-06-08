@@ -1,92 +1,121 @@
-import os
+"""
+Alpaca Markets live data ingestion → Google Cloud Pub/Sub.
+
+Opens a WebSocket stream for all configured symbols and publishes
+each trade tick as a JSON message to Pub/Sub. Handles reconnection
+with exponential back-off and graceful shutdown on SIGTERM.
+"""
+from __future__ import annotations
+
 import json
 import logging
-from datetime import datetime, UTC
+import os
+import signal
+import sys
+import time
+from datetime import datetime, timezone
+from typing import Any
 
-from google.cloud import pubsub_v1
 from alpaca.data.live import StockDataStream
+from google.cloud import pubsub_v1
 
-from symbol_config import SYMBOLS
-
-# -----------------------------------------------------------------------------
-# Logging
-# -----------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+from symbol_config import (
+    SYMBOLS, PROJECT_ID, PUBSUB_TOPIC,
+    RECONNECT_DELAY, MAX_RECONNECTS,
 )
 
-# -----------------------------------------------------------------------------
-# Environment variables (NO hardcoding keys)
-# -----------------------------------------------------------------------------
-API_KEY = os.getenv("ALPACA_API_KEY")
-SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("alpaca_stream")
 
-if not API_KEY or not SECRET_KEY:
-    raise ValueError("Alpaca API keys not set in environment variables")
+# ── Alpaca credentials ────────────────────────────────────────────────────────
+API_KEY    = os.environ["ALPACA_API_KEY"]
+SECRET_KEY = os.environ["ALPACA_SECRET_KEY"]
 
-# -----------------------------------------------------------------------------
-# Pub/Sub setup
-# -----------------------------------------------------------------------------
-PROJECT_ID = "stock-intelligence-493706"
-TOPIC_ID = "stock-stream"
+# ── Pub/Sub client ────────────────────────────────────────────────────────────
+publisher   = pubsub_v1.PublisherClient()
+TOPIC_PATH  = publisher.topic_path(PROJECT_ID, PUBSUB_TOPIC)
 
-publisher = pubsub_v1.PublisherClient()
-topic_path = publisher.topic_path(PROJECT_ID, TOPIC_ID)
-
-# -----------------------------------------------------------------------------
-# Alpaca Live Stream Client (WebSocket)
-# -----------------------------------------------------------------------------
-stream = StockDataStream(API_KEY, SECRET_KEY)
+# ── State ─────────────────────────────────────────────────────────────────────
+_running      = True
+_reconnects   = 0
+_ticks_sent   = 0
 
 
-def publish_to_pubsub(message: dict) -> None:
-    """Publish trade event to Pub/Sub."""
-    try:
-        publisher.publish(
-            topic_path,
-            json.dumps(message).encode("utf-8")
-        )
-        logging.info(f"Published: {message['symbol']} | {message['price']}")
-    except Exception as e:
-        logging.error(f"Pub/Sub publish failed: {e}")
-
-
-# -----------------------------------------------------------------------------
-# Trade event handler (called for EVERY trade in real time)
-# -----------------------------------------------------------------------------
-async def trade_handler(trade):
-    """
-    This function is triggered automatically by Alpaca
-    every time a trade happens for subscribed symbols.
-    """
-
-    message = {
-        "symbol": trade.symbol,
-        "price": float(trade.price),
-        "volume": int(trade.size),
-        "timestamp": datetime.now(UTC).timestamp(),
+def _build_payload(trade: Any) -> bytes:
+    """Serialise an Alpaca trade object to UTF-8 JSON bytes."""
+    payload = {
+        "symbol":     trade.symbol,
+        "price":      float(trade.price),
+        "volume":     int(trade.size),
+        "trade_id":   str(trade.id) if hasattr(trade, "id") else "",
+        "exchange":   getattr(trade, "exchange", ""),
+        "timestamp":  trade.timestamp.isoformat()
+                      if hasattr(trade.timestamp, "isoformat")
+                      else str(trade.timestamp),
+        "ingested_at": datetime.now(timezone.utc).isoformat(),
     }
+    return json.dumps(payload).encode("utf-8")
 
-    publish_to_pubsub(message)
 
-
-# -----------------------------------------------------------------------------
-# Main runner with auto-reconnect
-# -----------------------------------------------------------------------------
-def main():
-    logging.info("Starting Alpaca live trade stream...")
-    logging.info(f"Subscribing to symbols: {SYMBOLS}")
-
-    stream.subscribe_trades(trade_handler, *SYMBOLS)
-
+def _on_trade(trade: Any) -> None:
+    """Callback invoked for every incoming trade tick."""
+    global _ticks_sent
     try:
-        stream.run()
-    except Exception as e:
-        logging.error(f"Stream crashed: {e}")
-        logging.info("Reconnecting to Alpaca stream...")
-        main()  # auto-reconnect
+        data    = _build_payload(trade)
+        future  = publisher.publish(
+            TOPIC_PATH,
+            data=data,
+            symbol=trade.symbol,
+        )
+        future.result(timeout=5)          # block briefly; raises on failure
+        _ticks_sent += 1
+        if _ticks_sent % 500 == 0:
+            logger.info("Published %d ticks so far", _ticks_sent)
+    except Exception as exc:
+        logger.error("Failed to publish tick for %s: %s", trade.symbol, exc)
+
+
+def _on_error(exc: Exception) -> None:
+    logger.error("Stream error: %s", exc)
+
+
+def _shutdown_handler(signum: int, frame: Any) -> None:
+    global _running
+    logger.info("Shutdown signal received — stopping stream.")
+    _running = False
+    sys.exit(0)
+
+
+def run() -> None:
+    """Main entry point — stream trades with reconnection logic."""
+    global _reconnects, _running
+
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+    signal.signal(signal.SIGINT,  _shutdown_handler)
+
+    logger.info("Starting Alpaca stream | symbols=%s | topic=%s", SYMBOLS, TOPIC_PATH)
+
+    while _running and _reconnects <= MAX_RECONNECTS:
+        try:
+            stream = StockDataStream(API_KEY, SECRET_KEY)
+            stream.subscribe_trades(_on_trade, *SYMBOLS)
+            logger.info("WebSocket connected. Streaming %d symbols...", len(SYMBOLS))
+            stream.run()                  # blocks until disconnect
+        except Exception as exc:
+            _reconnects += 1
+            wait = RECONNECT_DELAY * (2 ** min(_reconnects, 5))
+            logger.warning(
+                "Stream disconnected (%s). Reconnect %d/%d in %ds.",
+                exc, _reconnects, MAX_RECONNECTS, wait,
+            )
+            time.sleep(wait)
+
+    logger.info("Stream terminated. Total ticks published: %d", _ticks_sent)
 
 
 if __name__ == "__main__":
-    main()
+    run()
