@@ -9,7 +9,7 @@
 ![Tests](https://img.shields.io/badge/tests-passing-brightgreen)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-> End-to-end real-time stock intelligence system on GCP. Live trade ticks stream from Alpaca Markets through Pub/Sub into an Apache Beam/Dataflow feature-engineering pipeline, land in BigQuery, feed an LSTM + ARIMA hybrid forecasting model, and surface through a Flask dashboard deployed on Cloud Run.
+> End-to-end real-time stock intelligence system on GCP. Live trade ticks stream from Alpaca Markets through Pub/Sub into an Apache Beam/Dataflow feature-engineering pipeline, land in BigQuery, feed an Temporal Fusion Transformer (TFT) forecasting model, and surface through a Flask dashboard deployed on Cloud Run.
 
 ---
 
