@@ -1,4 +1,4 @@
-# Real-Time Stock Intelligence Platform â GCP
+# Real-Time Stock Intelligence Platform GCP
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
 ![Apache Beam](https://img.shields.io/badge/Apache%20Beam-2.54-orange?logo=apachebeam)
