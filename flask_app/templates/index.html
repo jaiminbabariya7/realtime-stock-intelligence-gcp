@@ -1,55 +1,268 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Stock Intelligence</title>
-    <link rel="stylesheet" href="/static/style.css">
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Stock Intelligence Platform</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
-
 <body>
+<div class="app">
 
-<h1>Stock Prediction Search</h1>
-
-<div class="container">
-
-    <input id="symbol" placeholder="Enter symbol (AAPL, TSLA)" />
-    <button onclick="searchStock()">Search</button>
-
-    <!-- NEW: helper section -->
-    <div class="helper">
-        <h3>Supported Symbols</h3>
-        <ul>
-            <li>AAPL → Apple</li>
-            <li>TSLA → Tesla</li>
-            <li>MSFT → Microsoft</li>
-            <li>GOOGL → Google</li>
-            <li>AMZN → Amazon</li>
-        </ul>
+  <!-- Header -->
+  <header class="header">
+    <div class="header-left">
+      <span class="logo">&#9650; Stock Intelligence</span>
+      <span class="badge">LIVE</span>
     </div>
+    <div class="header-right">
+      <span id="clock" class="clock"></span>
+      <span class="powered">Powered by GCP &middot; Apache Beam &middot; LSTM</span>
+    </div>
+  </header>
 
-    <div id="result"></div>
+  <!-- Symbol selector -->
+  <section class="symbol-bar">
+    <button class="sym-btn active" onclick="selectSymbol('AAPL')">AAPL</button>
+    <button class="sym-btn" onclick="selectSymbol('TSLA')">TSLA</button>
+    <button class="sym-btn" onclick="selectSymbol('NVDA')">NVDA</button>
+    <button class="sym-btn" onclick="selectSymbol('MSFT')">MSFT</button>
+    <button class="sym-btn" onclick="selectSymbol('GOOGL')">GOOGL</button>
+    <button class="sym-btn" onclick="selectSymbol('AMZN')">AMZN</button>
+    <button class="sym-btn" onclick="selectSymbol('META')">META</button>
+    <button class="sym-btn" onclick="selectSymbol('NFLX')">NFLX</button>
+  </section>
+
+  <!-- KPI cards -->
+  <section class="kpi-grid">
+    <div class="kpi-card">
+      <div class="kpi-label">Current Price</div>
+      <div class="kpi-value" id="current-price">--</div>
+      <div class="kpi-sub" id="price-change">--</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">ML Prediction (next tick)</div>
+      <div class="kpi-value" id="predicted-price">--</div>
+      <div class="kpi-sub" id="prediction-dir">--</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">VWAP</div>
+      <div class="kpi-value" id="vwap">--</div>
+      <div class="kpi-sub">Volume-Weighted Avg Price</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Last Updated</div>
+      <div class="kpi-value" id="last-update" style="font-size:1rem">--</div>
+      <div class="kpi-sub">UTC</div>
+    </div>
+  </section>
+
+  <!-- Charts -->
+  <section class="charts-grid">
+    <div class="chart-card wide">
+      <div class="chart-title">Price History &amp; ML Forecast</div>
+      <canvas id="priceChart"></canvas>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Volume (last 50 ticks)</div>
+      <canvas id="volumeChart"></canvas>
+    </div>
+  </section>
+
+  <!-- All predictions table -->
+  <section class="table-section">
+    <div class="section-title">All Symbol Predictions</div>
+    <table class="pred-table">
+      <thead>
+        <tr><th>Symbol</th><th>Current ($)</th><th>Predicted ($)</th><th>Change %</th><th>Direction</th><th>As of</th></tr>
+      </thead>
+      <tbody id="pred-table-body">
+        <tr><td colspan="6" class="loading">Loading predictions...</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer class="footer">
+    Stack: Alpaca Markets &rarr; Google Pub/Sub &rarr; Apache Beam / Dataflow &rarr; BigQuery &rarr; LSTM+ARIMA &rarr; Cloud Run
+  </footer>
 </div>
 
 <script>
-function searchStock() {
-    let symbol = document.getElementById("symbol").value;
+  let currentSymbol = 'AAPL';
+  let priceChart = null;
+  let volumeChart = null;
 
-    fetch(`/search/${symbol}`)
-        .then(res => res.json())
-        .then(data => {
+  // ── Clock ──────────────────────────────────────────────────────────────────
+  function updateClock() {
+    document.getElementById('clock').textContent =
+      new Date().toUTCString().slice(17, 25) + ' UTC';
+  }
+  setInterval(updateClock, 1000);
+  updateClock();
 
-            if (data.error) {
-                document.getElementById("result").innerHTML = data.error;
-                return;
-            }
+  // ── Symbol selection ───────────────────────────────────────────────────────
+  function selectSymbol(sym) {
+    currentSymbol = sym;
+    document.querySelectorAll('.sym-btn').forEach(b => {
+      b.classList.toggle('active', b.textContent === sym);
+    });
+    loadLatest(sym);
+    loadHistory(sym);
+  }
 
-            document.getElementById("result").innerHTML = `
-                <h2>${data.symbol}</h2>
-                <p>Predicted Price: ${data.predicted_price}</p>
-                <p>Time: ${data.prediction_time}</p>
-            `;
-        });
-}
+  // ── Fetch latest tick + prediction ────────────────────────────────────────
+  async function loadLatest(sym) {
+    try {
+      const res = await fetch('/api/latest/' + sym);
+      const data = await res.json();
+      const tick = data.tick || {};
+      const pred = data.prediction || {};
+
+      const price = tick.price != null ? '$' + parseFloat(tick.price).toFixed(2) : '--';
+      const ret   = tick.price_return != null
+        ? (tick.price_return * 100).toFixed(3) + '%'
+        : '--';
+      const retClass = tick.price_return > 0 ? 'up' : (tick.price_return < 0 ? 'down' : '');
+
+      document.getElementById('current-price').textContent = price;
+      document.getElementById('price-change').innerHTML =
+        '<span class="' + retClass + '">' + ret + '</span>';
+      document.getElementById('vwap').textContent =
+        tick.vwap != null ? '$' + parseFloat(tick.vwap).toFixed(2) : '--';
+
+      if (pred.predicted_price != null) {
+        document.getElementById('predicted-price').textContent =
+          '$' + parseFloat(pred.predicted_price).toFixed(2);
+        const dir  = pred.direction || '';
+        const pct  = pred.change_pct != null ? parseFloat(pred.change_pct).toFixed(3) + '%' : '';
+        document.getElementById('prediction-dir').innerHTML =
+          '<span class="' + (dir === 'UP' ? 'up' : 'down') + '">' + dir + ' ' + pct + '</span>';
+      }
+
+      const ts = tick.tick_ts || pred.prediction_time || '';
+      document.getElementById('last-update').textContent = ts ? ts.slice(0, 19).replace('T', ' ') : '--';
+    } catch (e) {
+      console.error('loadLatest error:', e);
+    }
+  }
+
+  // ── Fetch price history and render charts ─────────────────────────────────
+  async function loadHistory(sym) {
+    try {
+      const res  = await fetch('/api/history/' + sym);
+      const data = await res.json();
+      const ticks = data.ticks || [];
+
+      const labels  = ticks.map(t => t.tick_ts ? t.tick_ts.slice(11, 19) : '');
+      const prices  = ticks.map(t => parseFloat(t.price));
+      const volumes = ticks.map(t => parseInt(t.volume));
+      const vwaps   = ticks.map(t => t.vwap != null ? parseFloat(t.vwap) : null);
+
+      renderPriceChart(labels, prices, vwaps);
+      renderVolumeChart(labels.slice(-50), volumes.slice(-50));
+    } catch (e) {
+      console.error('loadHistory error:', e);
+    }
+  }
+
+  // ── Price Chart ───────────────────────────────────────────────────────────
+  function renderPriceChart(labels, prices, vwaps) {
+    if (priceChart) priceChart.destroy();
+    const ctx = document.getElementById('priceChart').getContext('2d');
+    priceChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Price', data: prices, borderColor: '#4f8ef7',
+            backgroundColor: 'rgba(79,142,247,0.08)', borderWidth: 2,
+            pointRadius: 0, tension: 0.3, fill: true },
+          { label: 'VWAP', data: vwaps, borderColor: '#f7a44f',
+            borderWidth: 1.5, borderDash: [5,3], pointRadius: 0, tension: 0.3 },
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#cdd6f4' } } },
+        scales: {
+          x: { ticks: { color: '#a6adc8', maxTicksLimit: 10 },
+               grid: { color: '#313244' } },
+          y: { ticks: { color: '#a6adc8',
+                         callback: v => '$' + v.toFixed(2) },
+               grid: { color: '#313244' } }
+        }
+      }
+    });
+  }
+
+  // ── Volume Chart ──────────────────────────────────────────────────────────
+  function renderVolumeChart(labels, volumes) {
+    if (volumeChart) volumeChart.destroy();
+    const ctx = document.getElementById('volumeChart').getContext('2d');
+    volumeChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Volume', data: volumes,
+          backgroundColor: 'rgba(166,227,161,0.5)',
+          borderColor: '#a6e3a1', borderWidth: 1
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#cdd6f4' } } },
+        scales: {
+          x: { ticks: { color: '#a6adc8', maxTicksLimit: 8 },
+               grid: { color: '#313244' } },
+          y: { ticks: { color: '#a6adc8' }, grid: { color: '#313244' } }
+        }
+      }
+    });
+  }
+
+  // ── All predictions table ─────────────────────────────────────────────────
+  async function loadPredictions() {
+    try {
+      const res  = await fetch('/api/predictions');
+      const data = await res.json();
+      const rows = (data.predictions || []).map(p => {
+        const dir   = p.direction || '--';
+        const cls   = dir === 'UP' ? 'up' : 'down';
+        const pct   = p.change_pct != null ? parseFloat(p.change_pct).toFixed(3) + '%' : '--';
+        const ts    = p.prediction_time ? p.prediction_time.slice(11, 19) : '--';
+        return '<tr>' +
+          '<td><b>' + (p.symbol || '--') + '</b></td>' +
+          '<td>$' + (p.current_price != null ? parseFloat(p.current_price).toFixed(2) : '--') + '</td>' +
+          '<td>$' + (p.predicted_price != null ? parseFloat(p.predicted_price).toFixed(2) : '--') + '</td>' +
+          '<td class="' + cls + '">' + pct + '</td>' +
+          '<td class="' + cls + '">' + dir + '</td>' +
+          '<td>' + ts + '</td>' +
+          '</tr>';
+      });
+      document.getElementById('pred-table-body').innerHTML =
+        rows.length ? rows.join('') : '<tr><td colspan="6" class="loading">No predictions yet</td></tr>';
+    } catch (e) {
+      console.error('loadPredictions error:', e);
+    }
+  }
+
+  // ── Auto-refresh ──────────────────────────────────────────────────────────
+  function refresh() {
+    loadLatest(currentSymbol);
+    loadPredictions();
+  }
+
+  // Initial load
+  loadLatest(currentSymbol);
+  loadHistory(currentSymbol);
+  loadPredictions();
+
+  // Refresh every 10 seconds
+  setInterval(refresh, 10000);
+  // Reload charts every 30 seconds
+  setInterval(() => loadHistory(currentSymbol), 30000);
 </script>
-
 </body>
 </html>
