@@ -41,8 +41,8 @@
   <text x="608" y="97" text-anchor="middle" font-size="10" fill="#a6adc8">Cloud Dataflow</text>
   <line x1="550" y1="105" x2="667" y2="105" stroke="#45475a" stroke-width="0.5"/>
   <text x="608" y="120" text-anchor="middle" font-size="9" fill="#cdd6f4">&#8226; Parse &amp; Validate</text>
-  <text x="608" y="134" text-anchor="middle" font-size="9" fill="#cdd6f4">&#8226; FixedWindows(10s)</text>
-  <text x="608" y="148" text-anchor="middle" font-size="9" fill="#cdd6f4">&#8226; VWAP, Return, Vol</text>
+  <text x="608" y="134" text-anchor="middle" font-size="9" fill="#cdd6f4">&#8226; Stateful per symbol</text>
+  <text x="608" y="148" text-anchor="middle" font-size="9" fill="#cdd6f4">&#8226; VWAP, SMA, 10s windows</text>
 
   <!-- Arrow 4→5 -->
   <line x1="681" y1="115" x2="723" y2="115" stroke="#f7a44f" stroke-width="1.5" marker-end="url(#arr)"/>
@@ -62,9 +62,9 @@
   <rect x="700" y="218" width="170" height="90" rx="8" fill="#313244" stroke="#cba6f7" stroke-width="1.5"/>
   <text x="785" y="240" text-anchor="middle" font-size="12" font-weight="700" fill="#cba6f7">ML Models (GCS)</text>
   <line x1="714" y1="250" x2="856" y2="250" stroke="#45475a" stroke-width="0.5"/>
-  <text x="785" y="266" text-anchor="middle" font-size="9" fill="#cdd6f4">&#8226; ARIMA(5,1,0) — trend</text>
-  <text x="785" y="280" text-anchor="middle" font-size="9" fill="#cdd6f4">&#8226; LSTM(128→64) — residuals</text>
-  <text x="785" y="294" text-anchor="middle" font-size="9" fill="#cdd6f4">&#8226; Hybrid forecast</text>
+  <text x="785" y="266" text-anchor="middle" font-size="9" fill="#cdd6f4">&#8226; Temporal Fusion Transformer</text>
+  <text x="785" y="280" text-anchor="middle" font-size="9" fill="#cdd6f4">&#8226; PyTorch Forecasting</text>
+  <text x="785" y="294" text-anchor="middle" font-size="9" fill="#cdd6f4">&#8226; p10 / p50 / p90 forecasts</text>
 
   <!-- Arrow ML → BigQuery predictions -->
   <line x1="700" y1="260" x2="620" y2="260" stroke="#cba6f7" stroke-width="1.5" marker-end="url(#arr2)"/>
@@ -105,11 +105,11 @@
   <text x="200" y="425" text-anchor="middle" font-size="10" fill="#f9e2af">&#8226; GCP Pub/Sub</text>
   <text x="320" y="425" text-anchor="middle" font-size="10" fill="#f7a44f">&#8226; Apache Beam / Dataflow</text>
   <text x="470" y="425" text-anchor="middle" font-size="10" fill="#4f8ef7">&#8226; BigQuery</text>
-  <text x="570" y="425" text-anchor="middle" font-size="10" fill="#cba6f7">&#8226; TensorFlow LSTM</text>
+  <text x="570" y="425" text-anchor="middle" font-size="10" fill="#cba6f7">&#8226; PyTorch TFT</text>
   <text x="700" y="425" text-anchor="middle" font-size="10" fill="#f38ba8">&#8226; Flask + Cloud Run</text>
   <text x="820" y="425" text-anchor="middle" font-size="10" fill="#a6e3a1">&#8226; Docker</text>
   <text x="280" y="448" text-anchor="middle" font-size="10" fill="#a6adc8">Data Source: Alpaca Markets WebSocket</text>
-  <text x="600" y="448" text-anchor="middle" font-size="10" fill="#a6adc8">ML: ARIMA(5,1,0) + Stacked LSTM (128&#8594;64&#8594;Dense)</text>
+  <text x="600" y="448" text-anchor="middle" font-size="10" fill="#a6adc8">ML: Temporal Fusion Transformer (PyTorch Forecasting), quantile forecasts</text>
 
   <!-- Arrow markers -->
   <defs>

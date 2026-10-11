@@ -5,7 +5,7 @@ Thank you for your interest in contributing! This document outlines the process 
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/Stock-Intelligence-Platform`
+2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/realtime-stock-intelligence-gcp`
 3. Create a feature branch: `git checkout -b feature/your-feature-name`
 4. Install dev dependencies: `make install-dev`
 

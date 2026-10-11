@@ -2,6 +2,7 @@
 
 install:
 	pip install -r ingestion/requirements.txt
+	pip install -r dataflow/requirements.txt
 	pip install -r ml/requirements.txt
 	pip install -r flask_app/requirements.txt
 
@@ -21,13 +22,13 @@ test:
 	pytest tests/ -v --cov=. --cov-report=term-missing --cov-report=html
 
 docker-build:
-	docker build -t stock-intelligence:latest ./flask_app
+	docker build -f flask_app/Dockerfile -t stock-intelligence:latest .
 
 docker-run:
 	docker run -p 8080:8080 \
 		-e GOOGLE_APPLICATION_CREDENTIALS=/app/creds.json \
-		-e BIGQUERY_PROJECT_ID=${BIGQUERY_PROJECT_ID} \
-		-e BIGQUERY_DATASET=${BIGQUERY_DATASET} \
+		-e GCP_PROJECT_ID=${GCP_PROJECT_ID} \
+		-e BQ_DATASET=${BQ_DATASET} \
 		stock-intelligence:latest
 
 clean:

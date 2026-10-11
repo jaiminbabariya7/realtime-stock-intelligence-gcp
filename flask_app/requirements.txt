@@ -2,3 +2,4 @@ flask>=3.0
 gunicorn>=21.0
 google-cloud-bigquery>=3.11
 pandas>=2.0
+db-dtypes>=1.2

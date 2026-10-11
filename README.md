@@ -81,6 +81,7 @@ realtime-stock-intelligence-gcp/
 |   |-- stock_pipeline.py     # Apache Beam: parse -> stateful features -> window -> BigQuery
 |   |-- features.py           # Pure parsing + feature logic (unit-tested, no Beam import)
 |   |-- setup.py              # Ships features.py to Dataflow workers
+|   |-- requirements.txt      # apache-beam[gcp]
 |
 |-- streaming/
 |   |-- pubsub_publisher.py   # Simulated tick publisher for local testing
@@ -93,7 +94,7 @@ realtime-stock-intelligence-gcp/
 |-- flask_app/
 |   |-- app.py                # 6-route Flask REST API + dashboard
 |   |-- requirements.txt
-|   |-- Dockerfile            # gunicorn on port 8080 for Cloud Run
+|   |-- Dockerfile            # gunicorn on $PORT for Cloud Run (build from repo root)
 |   |-- templates/
 |   |   |-- index.html        # Live dashboard UI
 |   |-- static/
@@ -103,7 +104,7 @@ realtime-stock-intelligence-gcp/
 |   |-- test_ingestion.py
 |   |-- test_dataflow.py
 |
-|-- Snapshots/                # Screenshots: Dataflow graph, BigQuery, dashboard, Cloud Run
+|-- Snapshots/                # architecture.svg (current) + v1/ screenshots from the first deployment
 |-- pyproject.toml
 |-- Makefile
 |-- CONTRIBUTING.md
@@ -221,7 +222,7 @@ PYTHONPATH=ingestion python ml/train_model.py --symbol AAPL --window 3000
 PYTHONPATH=ingestion python ml/predict.py --symbol AAPL
 
 # 5. Start dashboard
-cd flask_app && flask run --port 8080
+PYTHONPATH=ingestion flask --app flask_app/app.py run --port 8080
 ```
 
 ---
@@ -236,8 +237,8 @@ PYTHONPATH=ingestion python dataflow/stock_pipeline.py \
   --machine_type=n1-standard-4
 
 # Deploy Flask dashboard to Cloud Run
-cd flask_app
-docker build -t gcr.io/$GCP_PROJECT_ID/stock-dashboard .
+# (built from the repo root: the image also needs ingestion/symbol_config.py)
+docker build -f flask_app/Dockerfile -t gcr.io/$GCP_PROJECT_ID/stock-dashboard .
 docker push gcr.io/$GCP_PROJECT_ID/stock-dashboard
 gcloud run deploy stock-dashboard \
   --image gcr.io/$GCP_PROJECT_ID/stock-dashboard \
@@ -290,6 +291,11 @@ Each symbol's best checkpoint is saved to GCS; predictions expose median,
 lower bound (p10), and upper bound (p90) with attention weight logging.
 
 ---
+
+## Version History
+
+- **v1 (April 2026)** ran end to end on GCP: polling-based ingestion to Pub/Sub, a simple Dataflow job (read, transform, write to BigQuery), an ARIMA + LSTM model and a search-style prediction page on Cloud Run. Screenshots from that deployment are in [`Snapshots/v1/`](Snapshots/v1/) (Dataflow job graph, Pub/Sub messages, BigQuery tables, Cloud Build / Cloud Run, the v1 UI).
+- **v2 (current code)** rebuilt each layer: Alpaca WebSocket ingestion with reconnects, stateful per-symbol Beam features (VWAP, SMA, returns), a Temporal Fusion Transformer with quantile forecasts, and the multi-route Flask dashboard. The v1 screenshots therefore show the earlier code and table names, not this version.
 
 ## Skills Demonstrated
 `Python` · `Apache Beam` · `Cloud Dataflow` · `Google Pub/Sub` · `BigQuery` · `PyTorch` · `TFT` · `MLflow` · `Flask` · `Docker` · `Cloud Run` · `GCS` · `Real-Time Pipelines` · `MLOps`
