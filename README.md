@@ -41,8 +41,9 @@ Google Cloud Pub/Sub  (topic: stock-price-events)
         v
 Apache Beam / Cloud Dataflow  [dataflow/stock_pipeline.py]
   |-- ParseAndValidate   — decode, validate, drop malformed ticks
+  |-- KeyBySymbol        — key each tick by its symbol
+  |-- FeatureEngineering — stateful per symbol: price return, VWAP, SMA short/long, dollar volume
   |-- FixedWindows(10s)  — 10-second tumbling windows
-  |-- FeatureEngineering — price return, VWAP, dollar volume
   |-- AddWindowEnd       — stamp window boundary
         |
         v
@@ -77,7 +78,9 @@ realtime-stock-intelligence-gcp/
 |   |-- requirements.txt
 |
 |-- dataflow/
-|   |-- stock_pipeline.py     # Apache Beam: parse -> window -> features -> BigQuery
+|   |-- stock_pipeline.py     # Apache Beam: parse -> stateful features -> window -> BigQuery
+|   |-- features.py           # Pure parsing + feature logic (unit-tested, no Beam import)
+|   |-- setup.py              # Ships features.py to Dataflow workers
 |
 |-- streaming/
 |   |-- pubsub_publisher.py   # Simulated tick publisher for local testing
@@ -120,9 +123,11 @@ Opens a WebSocket to Alpaca Markets for all configured symbols. Every trade tick
 ### 2. Dataflow Pipeline — `dataflow/stock_pipeline.py`
 Apache Beam streaming pipeline with:
 - **ParseAndValidate** — decodes Pub/Sub bytes, drops malformed/zero-price ticks
-- **FixedWindows(10s)** — groups ticks into 10-second tumbling windows
-- **FeatureEngineering** — computes VWAP, price return (%), dollar volume ($ millions)
+- **FeatureEngineering** — a stateful DoFn keyed by symbol. Each symbol's last `SMA_LONG` (default 30) prices and volumes live in Beam state, so history is checkpointed by the runner, survives worker restarts and is never split across workers. Computes price return, rolling VWAP, SMA short (10 ticks) and SMA long (30 ticks), and dollar volume ($ millions)
+- **FixedWindows(10s)** — groups the enriched ticks into 10-second tumbling windows (applied after the stateful step so history carries across windows)
 - **WriteToBigQuery** — appends enriched ticks to partitioned BigQuery table
+
+The parsing and feature math live in `dataflow/features.py` with no Beam dependency, and `tests/test_dataflow.py` tests those exact functions.
 
 ### 3. ML Training — `ml/train_model.py`
 Temporal Fusion Transformer (TFT) via PyTorch Forecasting + PyTorch Lightning:
@@ -160,7 +165,9 @@ symbol        STRING    NOT NULL
 price         FLOAT64   NOT NULL
 volume        INTEGER   NOT NULL
 price_return  FLOAT64               -- (price - prev_price) / prev_price
-vwap          FLOAT64               -- volume-weighted average price
+vwap          FLOAT64               -- volume-weighted average price (rolling window)
+sma_short     FLOAT64               -- simple moving average, last SMA_SHORT ticks
+sma_long      FLOAT64               -- simple moving average, last SMA_LONG ticks
 price_usd_m   FLOAT64               -- dollar volume in millions
 exchange      STRING
 trade_id      STRING
@@ -205,13 +212,13 @@ make install
 python streaming/pubsub_publisher.py
 
 # 2. Run Dataflow pipeline locally
-python dataflow/stock_pipeline.py --runner=DirectRunner
+PYTHONPATH=ingestion python dataflow/stock_pipeline.py --runner=DirectRunner
 
 # 3. Train model for one symbol
-python ml/train_model.py --symbol AAPL --window 3000
+PYTHONPATH=ingestion python ml/train_model.py --symbol AAPL --window 3000
 
 # 4. Run batch predictions
-python ml/predict.py --symbol AAPL
+PYTHONPATH=ingestion python ml/predict.py --symbol AAPL
 
 # 5. Start dashboard
 cd flask_app && flask run --port 8080
@@ -223,7 +230,7 @@ cd flask_app && flask run --port 8080
 
 ```bash
 # Submit Dataflow pipeline
-python dataflow/stock_pipeline.py \
+PYTHONPATH=ingestion python dataflow/stock_pipeline.py \
   --runner=DataflowRunner \
   --region=us-central1 \
   --machine_type=n1-standard-4
@@ -247,7 +254,8 @@ The model is a **Temporal Fusion Transformer** (Lim et al., 2021 — *Internatio
 
 ```
 Encoder Input (60 ticks):
-  price, volume, vwap, price_return, price_usd_m   ← time-varying unknowns
+  price, volume, vwap, sma_short, sma_long,
+  price_return, price_usd_m                        ← time-varying unknowns
   hour_of_day, day_of_week                          ← time-varying knowns
   symbol                                            ← static categorical
         |

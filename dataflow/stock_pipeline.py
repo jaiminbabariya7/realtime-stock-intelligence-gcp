@@ -2,8 +2,9 @@
 Apache Beam streaming pipeline — Stock Intelligence Platform.
 
 Reads raw trade ticks from Pub/Sub, validates records, computes per-symbol
-features (price return, rolling VWAP over the last SMA_LONG ticks, dollar
-volume), and writes to BigQuery.
+features (price return, rolling VWAP, SMA short/long, dollar volume) using
+Beam state keyed by symbol, windows them into 10-second windows, and writes
+to BigQuery.
 
 Deploy: python stock_pipeline.py --runner=DataflowRunner ...
 Local:  python stock_pipeline.py --runner=DirectRunner ...
@@ -11,17 +12,21 @@ Local:  python stock_pipeline.py --runner=DirectRunner ...
 from __future__ import annotations
 
 import argparse
-import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Iterator
 
 import apache_beam as beam
+from apache_beam.coders import PickleCoder
 from apache_beam.options.pipeline_options import (
-    GoogleCloudOptions, PipelineOptions, StandardOptions,
+    GoogleCloudOptions, PipelineOptions, SetupOptions, StandardOptions,
 )
 from apache_beam.transforms.window import FixedWindows
 from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
+from apache_beam.transforms.userstate import ReadModifyWriteStateSpec
+
+from features import compute_features, parse_tick
 
 from symbol_config import (
     PROJECT_ID, PUBSUB_SUB, BQ_FEAT_TABLE,
@@ -38,6 +43,8 @@ BQ_SCHEMA = {
         {"name": "volume",       "type": "INTEGER",   "mode": "REQUIRED"},
         {"name": "price_return", "type": "FLOAT64",   "mode": "NULLABLE"},
         {"name": "vwap",         "type": "FLOAT64",   "mode": "NULLABLE"},
+        {"name": "sma_short",    "type": "FLOAT64",   "mode": "NULLABLE"},
+        {"name": "sma_long",     "type": "FLOAT64",   "mode": "NULLABLE"},
         {"name": "price_usd_m",  "type": "FLOAT64",   "mode": "NULLABLE"},
         {"name": "exchange",     "type": "STRING",    "mode": "NULLABLE"},
         {"name": "trade_id",     "type": "STRING",    "mode": "NULLABLE"},
@@ -47,80 +54,38 @@ BQ_SCHEMA = {
     ]
 }
 
-# Per-symbol running state (worker-local, keyed by symbol)
-_price_history: dict[str, list[float]]  = {}
-_vol_history:   dict[str, list[float]]  = {}
-
-
 # ── Transforms ─────────────────────────────────────────────────────────────────
 
 class ParseAndValidate(beam.DoFn):
     """Decode Pub/Sub bytes → dict; drop malformed messages."""
 
-    REQUIRED_FIELDS = {"symbol", "price", "volume", "timestamp"}
-
     def process(self, element: bytes) -> Iterator[dict]:
-        try:
-            record = json.loads(element.decode("utf-8"))
-            if not self.REQUIRED_FIELDS.issubset(record):
-                logger.warning("Dropping record — missing fields: %s",
-                               self.REQUIRED_FIELDS - set(record))
-                return
-            record["price"]  = float(record["price"])
-            record["volume"] = int(record["volume"])
-            if record["price"] <= 0 or record["volume"] < 0:
-                return
+        record = parse_tick(element)
+        if record is not None:
             yield record
-        except (json.JSONDecodeError, ValueError, KeyError) as exc:
-            logger.error("Parse error: %s | raw=%s", exc, element[:200])
 
 
 class FeatureEngineering(beam.DoFn):
-    """Compute per-symbol rolling technical features (worker-local state)."""
+    """Compute per-symbol rolling features with Beam state.
 
-    def process(self, record: dict) -> Iterator[dict]:
-        sym   = record["symbol"]
-        price = record["price"]
-        vol   = record["volume"]
+    Input is keyed by symbol, so each symbol's price/volume history lives in
+    runner-managed state: it is checkpointed with the pipeline, survives worker
+    restarts, and is never split across workers.
+    """
 
-        # Rolling price and volume history (bounded to SMA_LONG)
-        ph = _price_history.setdefault(sym, [])
-        vh = _vol_history.setdefault(sym, [])
-        ph.append(price)
-        vh.append(vol)
-        if len(ph) > SMA_LONG:
-            ph.pop(0)
-            vh.pop(0)
+    HISTORY = ReadModifyWriteStateSpec("history", PickleCoder())
 
-        n = len(ph)
+    def __init__(self, sma_short: int, sma_long: int) -> None:
+        self.sma_short = sma_short
+        self.sma_long = sma_long
 
-        # Price return vs previous tick
-        price_return = ((price - ph[-2]) / ph[-2]) if n >= 2 else None
-
-        # VWAP (volume-weighted average price over rolling window)
-        if n >= 2:
-            notional = sum(p * v for p, v in zip(ph, vh))
-            total_vol = sum(vh)
-            vwap = round(notional / total_vol, 4) if total_vol > 0 else None
-        else:
-            vwap = None
-
-        # Dollar volume (millions)
-        price_usd_m = round(price * vol / 1_000_000, 6)
-
-        yield {
-            "symbol":       sym,
-            "price":        price,
-            "volume":       vol,
-            "price_return": round(price_return, 6) if price_return is not None else None,
-            "vwap":         vwap,
-            "price_usd_m":  price_usd_m,
-            "exchange":     record.get("exchange", ""),
-            "trade_id":     record.get("trade_id", ""),
-            "tick_ts":      record.get("timestamp", ""),
-            "window_end":   None,
-            "processed_at": datetime.now(timezone.utc).isoformat(),
-        }
+    def process(self, element: tuple[str, dict],
+                history=beam.DoFn.StateParam(HISTORY)) -> Iterator[dict]:
+        _symbol, record = element
+        row, new_state = compute_features(record, history.read(),
+                                          self.sma_short, self.sma_long)
+        history.write(new_state)
+        yield row
 
 
 class AddWindowEnd(beam.DoFn):
@@ -140,9 +105,12 @@ def build_pipeline(p: beam.Pipeline) -> None:
     (
         p
         | "ReadPubSub"      >> beam.io.ReadFromPubSub(subscription=PUBSUB_SUB)
-        | "Window10s"       >> beam.WindowInto(FixedWindows(10))
         | "Parse"           >> beam.ParDo(ParseAndValidate())
-        | "Features"        >> beam.ParDo(FeatureEngineering())
+        | "KeyBySymbol"     >> beam.Map(lambda r: (r["symbol"], r))
+        # Stateful features run in the global window so history carries
+        # across the 10-second windows applied afterwards.
+        | "Features"        >> beam.ParDo(FeatureEngineering(SMA_SHORT, SMA_LONG))
+        | "Window10s"       >> beam.WindowInto(FixedWindows(10))
         | "AddWindow"       >> beam.ParDo(AddWindowEnd())
         | "WriteBigQuery"   >> WriteToBigQuery(
             BQ_FEAT_TABLE,
@@ -167,6 +135,9 @@ def run(argv: list[str] | None = None) -> None:
         save_main_session=True,
     )
     options.view_as(StandardOptions).streaming = True
+    # Ship features.py to the Dataflow workers
+    options.view_as(SetupOptions).setup_file = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "setup.py")
     gcp_opts = options.view_as(GoogleCloudOptions)
     gcp_opts.project         = PROJECT_ID
     gcp_opts.region          = known.region
