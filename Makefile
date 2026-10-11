@@ -26,6 +26,7 @@ docker-build:
 
 docker-run:
 	docker run -p 8080:8080 \
+		-v $(GOOGLE_APPLICATION_CREDENTIALS):/app/creds.json:ro \
 		-e GOOGLE_APPLICATION_CREDENTIALS=/app/creds.json \
 		-e GCP_PROJECT_ID=${GCP_PROJECT_ID} \
 		-e BQ_DATASET=${BQ_DATASET} \

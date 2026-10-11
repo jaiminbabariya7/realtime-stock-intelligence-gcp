@@ -103,6 +103,7 @@ realtime-stock-intelligence-gcp/
 |-- tests/
 |   |-- test_ingestion.py
 |   |-- test_dataflow.py
+|   |-- test_pipeline_beam.py
 |
 |-- Snapshots/                # architecture.svg (current) + v1/ screenshots from the first deployment
 |-- pyproject.toml
@@ -123,12 +124,12 @@ Opens a WebSocket to Alpaca Markets for all configured symbols. Every trade tick
 
 ### 2. Dataflow Pipeline — `dataflow/stock_pipeline.py`
 Apache Beam streaming pipeline with:
-- **ParseAndValidate** — decodes Pub/Sub bytes, drops malformed/zero-price ticks
+- **ParseAndValidate** — decodes Pub/Sub bytes, drops malformed/zero-price ticks, and stamps each tick with its trade time (event time)
 - **FeatureEngineering** — a stateful DoFn keyed by symbol. Each symbol's last `SMA_LONG` (default 30) prices and volumes live in Beam state, so history is checkpointed by the runner, survives worker restarts and is never split across workers. Computes price return, rolling VWAP, SMA short (10 ticks) and SMA long (30 ticks), and dollar volume ($ millions)
-- **FixedWindows(10s)** — groups the enriched ticks into 10-second tumbling windows (applied after the stateful step so history carries across windows)
+- **FixedWindows(10s)** — groups the enriched ticks into 10-second event-time tumbling windows (applied after the stateful step so history carries across windows)
 - **WriteToBigQuery** — appends enriched ticks to partitioned BigQuery table
 
-The parsing and feature math live in `dataflow/features.py` with no Beam dependency, and `tests/test_dataflow.py` tests those exact functions.
+The parsing and feature math live in `dataflow/features.py` with no Beam dependency, and `tests/test_dataflow.py` tests those exact functions. `tests/test_pipeline_beam.py` runs the real transform chain (`enrich()`: parse → key → stateful features → windows) on Beam's DirectRunner and checks that each symbol keeps its own history; it is skipped when apache-beam isn't installed.
 
 ### 3. ML Training — `ml/train_model.py`
 Temporal Fusion Transformer (TFT) via PyTorch Forecasting + PyTorch Lightning:

@@ -35,6 +35,17 @@ def parse_tick(raw: bytes) -> dict | None:
     return record
 
 
+def event_time_seconds(timestamp: str) -> float | None:
+    """Trade timestamp (ISO 8601, 'Z' or offset) -> Unix seconds, or None."""
+    try:
+        dt = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
 def empty_state() -> dict:
     return {"prices": [], "volumes": []}
 

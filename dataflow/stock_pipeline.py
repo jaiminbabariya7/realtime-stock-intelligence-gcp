@@ -22,11 +22,11 @@ from apache_beam.coders import PickleCoder
 from apache_beam.options.pipeline_options import (
     GoogleCloudOptions, PipelineOptions, SetupOptions, StandardOptions,
 )
-from apache_beam.transforms.window import FixedWindows
+from apache_beam.transforms.window import FixedWindows, TimestampedValue
 from apache_beam.io.gcp.bigquery import WriteToBigQuery, BigQueryDisposition
 from apache_beam.transforms.userstate import ReadModifyWriteStateSpec
 
-from features import compute_features, parse_tick
+from features import compute_features, event_time_seconds, parse_tick
 
 from symbol_config import (
     PROJECT_ID, PUBSUB_SUB, BQ_FEAT_TABLE,
@@ -57,12 +57,16 @@ BQ_SCHEMA = {
 # ── Transforms ─────────────────────────────────────────────────────────────────
 
 class ParseAndValidate(beam.DoFn):
-    """Decode Pub/Sub bytes → dict; drop malformed messages."""
+    """Decode Pub/Sub bytes → dict; drop malformed messages. Each tick is
+    re-timestamped with its trade time, so the 10 s windows are event-time
+    windows rather than Pub/Sub publish-time windows."""
 
-    def process(self, element: bytes) -> Iterator[dict]:
+    def process(self, element: bytes) -> Iterator:
         record = parse_tick(element)
-        if record is not None:
-            yield record
+        if record is None:
+            return
+        event_ts = event_time_seconds(record["timestamp"])
+        yield TimestampedValue(record, event_ts) if event_ts is not None else record
 
 
 class FeatureEngineering(beam.DoFn):
@@ -93,25 +97,34 @@ class AddWindowEnd(beam.DoFn):
 
     def process(self, record: dict,
                 window=beam.DoFn.WindowParam) -> Iterator[dict]:
-        end_dt = datetime.fromtimestamp(window.end, tz=timezone.utc)
+        # window.end is a Beam Timestamp; convert via float seconds
+        end_dt = datetime.fromtimestamp(float(window.end), tz=timezone.utc)
         record["window_end"] = end_dt.isoformat()
         yield record
 
 
 # ── Pipeline runner ────────────────────────────────────────────────────────────
 
+def enrich(raw_messages, sma_short: int = SMA_SHORT, sma_long: int = SMA_LONG):
+    """Parse -> key by symbol -> stateful features -> 10 s windows -> window end.
+
+    Stateful features run in the global window so history carries across the
+    10-second windows applied afterwards.
+    """
+    return (
+        raw_messages
+        | "Parse"           >> beam.ParDo(ParseAndValidate())
+        | "KeyBySymbol"     >> beam.Map(lambda r: (r["symbol"], r))
+        | "Features"        >> beam.ParDo(FeatureEngineering(sma_short, sma_long))
+        | "Window10s"       >> beam.WindowInto(FixedWindows(10))
+        | "AddWindow"       >> beam.ParDo(AddWindowEnd())
+    )
+
+
 def build_pipeline(p: beam.Pipeline) -> None:
     """Attach all transforms to the pipeline object."""
     (
-        p
-        | "ReadPubSub"      >> beam.io.ReadFromPubSub(subscription=PUBSUB_SUB)
-        | "Parse"           >> beam.ParDo(ParseAndValidate())
-        | "KeyBySymbol"     >> beam.Map(lambda r: (r["symbol"], r))
-        # Stateful features run in the global window so history carries
-        # across the 10-second windows applied afterwards.
-        | "Features"        >> beam.ParDo(FeatureEngineering(SMA_SHORT, SMA_LONG))
-        | "Window10s"       >> beam.WindowInto(FixedWindows(10))
-        | "AddWindow"       >> beam.ParDo(AddWindowEnd())
+        enrich(p | "ReadPubSub" >> beam.io.ReadFromPubSub(subscription=PUBSUB_SUB))
         | "WriteBigQuery"   >> WriteToBigQuery(
             BQ_FEAT_TABLE,
             schema=BQ_SCHEMA,

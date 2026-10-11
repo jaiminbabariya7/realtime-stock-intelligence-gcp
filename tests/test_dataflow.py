@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "dataflow"))
 
-from features import compute_features, empty_state, parse_tick  # noqa: E402
+from features import compute_features, empty_state, event_time_seconds, parse_tick  # noqa: E402
 
 
 def _tick(price, volume=100, symbol="AAPL"):
@@ -47,6 +47,15 @@ class TestParseTick(unittest.TestCase):
         raw = json.dumps({"symbol": "TSLA", "price": 0, "volume": 10,
                           "timestamp": "t"}).encode()
         self.assertIsNone(parse_tick(raw))
+
+
+class TestEventTime(unittest.TestCase):
+    def test_iso_with_z_and_offset(self):
+        self.assertEqual(event_time_seconds("1970-01-01T00:01:00Z"), 60.0)
+        self.assertEqual(event_time_seconds("1970-01-01T01:01:00+01:00"), 60.0)
+
+    def test_unparseable_returns_none(self):
+        self.assertIsNone(event_time_seconds("not-a-time"))
 
 
 class TestComputeFeatures(unittest.TestCase):
