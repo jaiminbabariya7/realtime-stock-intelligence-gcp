@@ -48,7 +48,7 @@ Apache Beam / Cloud Dataflow  [dataflow/stock_pipeline.py]
         v
 BigQuery: stock_data.stock_features  (partitioned by tick_ts)
         |
-        +----------> [ml/train_model.py]  — ARIMA + LSTM training → GCS
+        +----------> [ml/train_model.py]  — TFT training (PyTorch Forecasting) → GCS
         |
         +----------> [ml/predict.py]      — batch forecasting → BigQuery predictions
         |

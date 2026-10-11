@@ -1,8 +1,9 @@
 """
 Apache Beam streaming pipeline — Stock Intelligence Platform.
 
-Reads raw trade ticks from Pub/Sub, computes technical indicators
-(SMA, VWAP, price return), validates records, and writes to BigQuery.
+Reads raw trade ticks from Pub/Sub, validates records, computes per-symbol
+features (price return, rolling VWAP over the last SMA_LONG ticks, dollar
+volume), and writes to BigQuery.
 
 Deploy: python stock_pipeline.py --runner=DataflowRunner ...
 Local:  python stock_pipeline.py --runner=DirectRunner ...
