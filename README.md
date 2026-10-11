@@ -33,30 +33,30 @@
 Alpaca Markets WebSocket (live trades: AAPL, TSLA, NVDA, MSFT, GOOGL ...)
         |
         v
-[ingestion/alpaca_stream.py]  â reconnect logic, graceful shutdown
+[ingestion/alpaca_stream.py]  — reconnect logic, graceful shutdown
         |  JSON tick messages
         v
 Google Cloud Pub/Sub  (topic: stock-price-events)
         |
         v
 Apache Beam / Cloud Dataflow  [dataflow/stock_pipeline.py]
-  |-- ParseAndValidate   â decode, validate, drop malformed ticks
-  |-- FixedWindows(10s)  â 10-second tumbling windows
-  |-- FeatureEngineering â price return, VWAP, dollar volume
-  |-- AddWindowEnd       â stamp window boundary
+  |-- ParseAndValidate   — decode, validate, drop malformed ticks
+  |-- FixedWindows(10s)  — 10-second tumbling windows
+  |-- FeatureEngineering — price return, VWAP, dollar volume
+  |-- AddWindowEnd       — stamp window boundary
         |
         v
 BigQuery: stock_data.stock_features  (partitioned by tick_ts)
         |
-        +----------> [ml/train_model.py]  â ARIMA + LSTM training â GCS
+        +----------> [ml/train_model.py]  — ARIMA + LSTM training → GCS
         |
-        +----------> [ml/predict.py]      â batch forecasting â BigQuery predictions
+        +----------> [ml/predict.py]      — batch forecasting → BigQuery predictions
         |
         v
 BigQuery: stock_data.stock_predictions
         |
         v
-Flask Dashboard  [flask_app/app.py]  â deployed on Cloud Run
+Flask Dashboard  [flask_app/app.py]  → deployed on Cloud Run
   |-- /                       live dashboard (all symbols)
   |-- /api/latest/<symbol>    latest tick + prediction
   |-- /api/history/<symbol>   last 200 ticks for charting
@@ -83,7 +83,7 @@ realtime-stock-intelligence-gcp/
 |   |-- pubsub_publisher.py   # Simulated tick publisher for local testing
 |
 |-- ml/
-|   |-- train_model.py        # ARIMA + stacked LSTM training; artefacts -> GCS
+|   |-- train_model.py        # TFT training (PyTorch Forecasting); checkpoints -> GCS
 |   |-- predict.py            # Load models from GCS; batch predictions -> BigQuery
 |   |-- requirements.txt
 |
@@ -111,34 +111,34 @@ realtime-stock-intelligence-gcp/
 
 ## Components
 
-### 1. Ingestion â `ingestion/alpaca_stream.py`
+### 1. Ingestion — `ingestion/alpaca_stream.py`
 Opens a WebSocket to Alpaca Markets for all configured symbols. Every trade tick is serialised to JSON and published to Pub/Sub. Features:
 - Exponential back-off reconnection (up to `MAX_RECONNECTS`)
-- Graceful SIGTERM/SIGINT shutdown â no lost ticks
+- Graceful SIGTERM/SIGINT shutdown — no lost ticks
 - All config via environment variables (no hardcoded values)
 
-### 2. Dataflow Pipeline â `dataflow/stock_pipeline.py`
+### 2. Dataflow Pipeline — `dataflow/stock_pipeline.py`
 Apache Beam streaming pipeline with:
-- **ParseAndValidate** â decodes Pub/Sub bytes, drops malformed/zero-price ticks
-- **FixedWindows(10s)** â groups ticks into 10-second tumbling windows
-- **FeatureEngineering** â computes VWAP, price return (%), dollar volume ($ millions)
-- **WriteToBigQuery** â appends enriched ticks to partitioned BigQuery table
+- **ParseAndValidate** — decodes Pub/Sub bytes, drops malformed/zero-price ticks
+- **FixedWindows(10s)** — groups ticks into 10-second tumbling windows
+- **FeatureEngineering** — computes VWAP, price return (%), dollar volume ($ millions)
+- **WriteToBigQuery** — appends enriched ticks to partitioned BigQuery table
 
-### 3. ML Training â `ml/train_model.py`
-Hybrid ARIMA + stacked LSTM model:
-1. Fetches last N ticks per symbol from BigQuery feature table
-2. Fits ARIMA on price series to model linear trend
-3. Trains a 2-layer stacked LSTM on the ARIMA residuals (non-linear patterns)
-4. Evaluates on 10% hold-out; logs MAE and RMSE
-5. Saves all artefacts (model, scalers, metadata) to GCS
+### 3. ML Training — `ml/train_model.py`
+Temporal Fusion Transformer (TFT) via PyTorch Forecasting + PyTorch Lightning:
+1. Fetches the last N ticks per symbol from the BigQuery feature table
+2. Builds a multivariate `TimeSeriesDataSet` (time-varying and static features)
+3. Trains the TFT with quantile loss, early stopping and LR scheduling
+4. Evaluates on a hold-out window; logs MAE and RMSE to MLflow
+5. Saves the best checkpoint per symbol to GCS
 
-### 4. Prediction â `ml/predict.py`
+### 4. Prediction — `ml/predict.py`
 Batch inference runner:
-- Downloads model artefacts from GCS per symbol
-- Combines ARIMA 1-step forecast + LSTM residual correction
+- Loads the best TFT checkpoint from GCS per symbol
+- Produces p10 / p50 / p90 quantile forecasts (p50 drives the direction signal)
 - Writes `{symbol, current_price, predicted_price, change_pct, direction}` to BigQuery
 
-### 5. Flask Dashboard â `flask_app/app.py`
+### 5. Flask Dashboard — `flask_app/app.py`
 REST API + web dashboard deployed on Cloud Run:
 
 | Route | Description |
@@ -192,7 +192,7 @@ created_at      TIMESTAMP
 git clone https://github.com/jaiminbabariya7/realtime-stock-intelligence-gcp
 cd realtime-stock-intelligence-gcp
 cp .env.example .env
-# Edit .env â fill in GCP_PROJECT_ID, Alpaca keys, bucket names
+# Edit .env — fill in GCP_PROJECT_ID, Alpaca keys, bucket names
 make install
 ```
 
@@ -243,7 +243,7 @@ gcloud run deploy stock-dashboard \
 
 ## ML Model — Temporal Fusion Transformer (TFT)
 
-The model is a **Temporal Fusion Transformer** (Lim et al., 2021 — *International Journal of Forecasting*), replacing traditional ARIMA with a modern architecture that captures both short-term patterns and long-range dependencies simultaneously.
+The model is a **Temporal Fusion Transformer** (Lim et al., 2021 — *International Journal of Forecasting*), chosen over ARIMA or a plain LSTM because it captures both short-term patterns and long-range dependencies simultaneously.
 
 ```
 Encoder Input (60 ticks):
@@ -284,4 +284,4 @@ lower bound (p10), and upper bound (p90) with attention weight logging.
 ---
 
 ## Skills Demonstrated
-`Python` Â· `Apache Beam` Â· `Cloud Dataflow` Â· `Google Pub/Sub` Â· `BigQuery` Â· `PyTorch` Â· `TFT` Â· `MLflow` Â· `Flask` Â· `Docker` Â· `Cloud Run` Â· `GCS` Â· `Real-Time Pipelines` Â· `MLOps`
+`Python` · `Apache Beam` · `Cloud Dataflow` · `Google Pub/Sub` · `BigQuery` · `PyTorch` · `TFT` · `MLflow` · `Flask` · `Docker` · `Cloud Run` · `GCS` · `Real-Time Pipelines` · `MLOps`
